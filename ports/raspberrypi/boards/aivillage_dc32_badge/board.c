@@ -49,6 +49,29 @@ digitalio_digitalinout_obj_t enable_pin_obj;
 #define SSD1680_SET_RAMXCOUNT 0x4E
 #define SSD1680_SET_RAMYCOUNT 0x4F
 
+// Stolen from SQMFI Watchy SSD1681 based Init - Construction of "Update Sequence" (for SSD1680_DISP_CTRL2)
+
+// Combine the below commands to make an update sequence.
+// Note that commands like CLOCK_ON and CLOCK_OFF can be used together.
+// In this case, the signal will be enabled before the update and disabled after.
+#define EPDU_CLOCK_ON       0x80
+#define EPDU_ANALOG_ON      0x40
+#define EPDU_LOAD_TEMP      0x20
+#define EPDU_LOAD_LUT       0x10
+#define EPDU_DISP_MODE_1    0x00
+#define EPDU_DISP_MODE_2    0x08
+#define EPDU_OUTPUT         0x04
+#define EPDU_ANALOG_OFF     0x02
+#define EPDU_CLOCK_OFF      0x01
+#define EPDU_DISPLAY        (EPDU_OUTPUT | EPDU_LOAD_LUT)
+
+// Watchy EPD settings
+
+#define EPD_UPDATE_SEQUENCE (EPDU_CLOCK_ON | EPDU_ANALOG_ON | EPDU_LOAD_TEMP | \
+    EPDU_DISPLAY | EPDU_DISP_MODE_1 | EPDU_CLOCK_OFF | \
+    EPDU_ANALOG_OFF)
+#define EPD_POST_UPDATE     (EPDU_CLOCK_ON | EPDU_CLOCK_OFF | EPDU_ANALOG_OFF)
+
 // LUTs for 2.9in SSD1680 Display v2 from waveshare - https://github.com/waveshareteam/e-Paper/blob/master/Arduino/epd2in9_V2/epd2in9_V2.cpp
 /*
 unsigned char _WF_PARTIAL_2IN9[159] =
@@ -154,18 +177,21 @@ unsigned char WF_FULL[159] =
 */
 
 const uint8_t display_start_sequence[] = {
-    SSD1680_SW_RESET, 0,     // soft reset
-    DELAY, 20,          // busy wait
+    SSD1680_SW_RESET, DELAY, 20,  // soft reset & wait 20ms
     SSD1680_DATA_MODE, 1, 0x03, // Ram data entry mode
     SSD1680_WRITE_BORDER, 1, 0x05, // border color
 
     SSD1680_WRITE_VCOM, 1, 0x36,   // Vcom Voltage
     SSD1680_GATE_VOLTAGE, 1, 0x17, // Set gate voltage
     SSD1680_SOURCE_VOLTAGE, 3, 0x41, 0x00, 0x32,   // Set source voltage
-    SSD1680_DRIVER_CONTROL, 3, 0x27, 0x01, 0,     // Set Display Size
+
+    // SSD1680_TEMP_CONTROL, 1, 0x80, //Set temp control to use internal sensor (Stolen from SSD1681 init?)
+
     SSD1680_SET_RAMXCOUNT, 1, 1,
     SSD1680_SET_RAMYCOUNT, 2, 0, 0,
-    SSD1680_DISP_CTRL2, 1, 0xF4 // display update mode - Also used in circuitpy library in the update function?
+
+    SSD1680_DRIVER_CONTROL, 3, 0x27, 0x01, 0,         // Set Display Size
+    SSD1680_DISP_CTRL2, 1, 0xF7 // display update mode - Also used in circuitpy library in the update function?
     // **Final init steps I've found**
     // 0xFE via Adafruit_EPD (C++) Library ???
     // SSD1680_DISP_CTRL2, 1, 0xF7 sets to "Update/Refresh Full" via GxEPD2_290_T94.cpp by ZinggJM on Github
@@ -179,7 +205,7 @@ const uint8_t display_stop_sequence[] = {
 };
 
 const uint8_t refresh_sequence[] = {
-    SSD1680_DISP_CTRL2, 1, 0xF4, SSD1680_MASTER_ACTIVATE
+    SSD1680_MASTER_ACTIVATE, 0 // ", 0" stolen from sqmfi Watchy/SSD1681?
 };
 
 
@@ -204,7 +230,7 @@ void board_init(void) {
         &pin_GPIO20, // EPD_DC Command or data
         &pin_GPIO17, // EPD_CS Chip select
         &pin_GPIO21, // EPD_RST Reset
-        1200000, // Baudrate
+        1200000, // Baudrate - 1200000 was original
         0, // Polarity
         0); // Phase
 
@@ -215,7 +241,7 @@ void board_init(void) {
         display,
         bus,
         display_start_sequence, sizeof(display_start_sequence),
-        0, // start up time
+        1, // start up time
         display_stop_sequence, sizeof(display_stop_sequence),
         EPD_DISPLAY_WIDTH_PX,  // width
         EPD_DISPLAY_HEIGHT_PX,  // height
@@ -234,11 +260,11 @@ void board_init(void) {
         false,  // color_bits_inverted
         0x000000,  // highlight_color
         refresh_sequence, sizeof(refresh_sequence), // refresh_display_command
-        1.0,  // refresh_time
+        0.1,  // refresh_time
         &pin_GPIO26,  // busy_pin
         false,  // busy_state
-        2.0, // seconds_per_frame
-        true,  // always_toggle_chip_select
+        3.0, // seconds_per_frame
+        false,  // always_toggle_chip_select
         false, // grayscale
         false, // acep
         false,  // two_byte_sequence_length
