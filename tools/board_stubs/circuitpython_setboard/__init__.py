@@ -1,12 +1,23 @@
 # SPDX-FileCopyrightText: 2024 Tim Cocks
 #
 # SPDX-License-Identifier: MIT
-import argparse
 import sys
+
+version_info = sys.version_info
+if version_info.major < 3 or (version_info.major == 3 and version_info.minor < 9):
+    sys.stdout.write("Python 3.9 is the minimum supported version for board specific stubs.\n")
+    sys.exit(0)
+
+import argparse
 import shutil
 from collections import defaultdict
 from importlib import resources
-from importlib.abc import Traversable
+
+try:
+    from importlib.resources.abc import Traversable
+except ModuleNotFoundError:
+    # 3.10 and earlier.
+    from importlib.abc import Traversable
 
 
 def get_definitions_or_exit(board: str) -> Traversable:

@@ -21,16 +21,24 @@ void common_hal_rotaryio_incrementalencoder_construct(rotaryio_incrementalencode
     //
     // These routines also implicitly configure the weak internal pull-ups, as expected
     // in CircuitPython.
+
+    // Ensure object starts in its deinit state.
+    common_hal_rotaryio_incrementalencoder_mark_deinit(self);
+
     pcnt_unit_config_t unit_config = {
         // Set counter limit
-        .low_limit = -INT16_MAX,
+        .low_limit = INT16_MIN,
         .high_limit = INT16_MAX
     };
-    // The pulse count driver automatically counts roll overs.
+    // Enable PCNT internal accumulator to count overflows.
     unit_config.flags.accum_count = true;
 
     // initialize PCNT
     CHECK_ESP_RESULT(pcnt_new_unit(&unit_config, &self->unit));
+
+    // Set watchpoints at limits, to auto-accumulate overflows.
+    pcnt_unit_add_watch_point(self->unit, INT16_MIN);
+    pcnt_unit_add_watch_point(self->unit, INT16_MAX);
 
     pcnt_chan_config_t channel_a_config = {
         .edge_gpio_num = pin_a->number,
@@ -83,6 +91,10 @@ void common_hal_rotaryio_incrementalencoder_deinit(rotaryio_incrementalencoder_o
     pcnt_del_channel(self->channel_a);
     pcnt_del_channel(self->channel_b);
     pcnt_del_unit(self->unit);
+    common_hal_rotaryio_incrementalencoder_mark_deinit(self);
+}
+
+void common_hal_rotaryio_incrementalencoder_mark_deinit(rotaryio_incrementalencoder_obj_t *self) {
     self->unit = NULL;
 }
 

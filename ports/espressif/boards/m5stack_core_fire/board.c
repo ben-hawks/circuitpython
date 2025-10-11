@@ -13,7 +13,6 @@
 #include "shared-module/displayio/mipi_constants.h"
 #include "shared-bindings/board/__init__.h"
 
-fourwire_fourwire_obj_t board_display_obj;
 
 
 // display init sequence according to M5Gfx
@@ -90,8 +89,7 @@ void board_init(void) {
 bool espressif_board_reset_pin_number(gpio_num_t pin_number) {
     // Set speaker gpio to ground to prevent noise from the speaker
     if (pin_number == 25) {
-        gpio_set_direction(pin_number, GPIO_MODE_DEF_OUTPUT);
-        gpio_set_level(pin_number, false);
+        config_pin_as_output_with_level(pin_number, false);
         return true;
     }
     return false;

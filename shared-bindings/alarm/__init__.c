@@ -44,6 +44,7 @@
 //| For more information about working with alarms and light/deep sleep in CircuitPython,
 //| see `this Learn guide <https://learn.adafruit.com/deep-sleep-with-circuitpython>`_.
 //| """
+//|
 
 //| sleep_memory: SleepMemory
 //| """Memory that persists during deep sleep.
@@ -54,17 +55,20 @@
 //| If no alarm occurred since the last hard reset or soft restart, value is ``None``.
 //| """
 //|
+//|
 
 // wake_alarm is implemented as a dictionary entry, so there's no code here.
 
 static void validate_objs_are_alarms(size_t n_args, const mp_obj_t *objs) {
     for (size_t i = 0; i < n_args; i++) {
         if (mp_obj_is_type(objs[i], &alarm_pin_pinalarm_type) ||
-            mp_obj_is_type(objs[i], &alarm_time_timealarm_type) ||
+            #if CIRCUITPY_ALARM_TOUCH
+            mp_obj_is_type(objs[i], &alarm_touch_touchalarm_type) ||
+            #endif
             #if CIRCUITPY_ESPULP
             mp_obj_is_type(objs[i], &espulp_ulpalarm_type) ||
             #endif
-            mp_obj_is_type(objs[i], &alarm_touch_touchalarm_type)) {
+            mp_obj_is_type(objs[i], &alarm_time_timealarm_type)) {
             continue;
         }
         mp_raise_TypeError_varg(MP_ERROR_TEXT("Expected a kind of %q"), MP_QSTR_Alarm);
@@ -87,6 +91,7 @@ static void validate_objs_are_alarms(size_t n_args, const mp_obj_t *objs) {
 //|     it may be necessary to disconnect from the host.
 //|     """
 //|     ...
+//|
 //|
 static mp_obj_t alarm_light_sleep_until_alarms(size_t n_args, const mp_obj_t *args) {
     if (n_args == 0) {
@@ -170,6 +175,7 @@ MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(alarm_light_sleep_until_alarms_obj, 1, MP_OB
 //|     """
 //|     ...
 //|
+//|
 static mp_obj_t alarm_exit_and_deep_sleep_until_alarms(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
     enum { ARG_preserve_dios };
     static const mp_arg_t allowed_args[] = {
@@ -194,7 +200,7 @@ static mp_obj_t alarm_exit_and_deep_sleep_until_alarms(size_t n_args, const mp_o
     common_hal_alarm_set_deep_sleep_alarms(n_args, pos_args, num_dios, dios_array);
 
     // Raise an exception, which will be processed in main.c.
-    mp_raise_type_arg(&mp_type_DeepSleepRequest, NULL);
+    mp_raise_type(&mp_type_DeepSleepRequest);
 
     // Doesn't get here.
     return mp_const_none;
@@ -227,6 +233,7 @@ static const mp_obj_module_t alarm_time_module = {
     .globals = (mp_obj_dict_t *)&alarm_time_globals,
 };
 
+#if CIRCUITPY_ALARM_TOUCH
 static const mp_map_elem_t alarm_touch_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_touch) },
     { MP_ROM_QSTR(MP_QSTR_TouchAlarm), MP_OBJ_FROM_PTR(&alarm_touch_touchalarm_type) },
@@ -238,6 +245,7 @@ static const mp_obj_module_t alarm_touch_module = {
     .base = { &mp_type_module },
     .globals = (mp_obj_dict_t *)&alarm_touch_globals,
 };
+#endif
 
 // The module table is mutable because .wake_alarm is a mutable attribute.
 static mp_map_elem_t alarm_module_globals_table[] = {
@@ -252,7 +260,9 @@ static mp_map_elem_t alarm_module_globals_table[] = {
 
     { MP_ROM_QSTR(MP_QSTR_pin), MP_OBJ_FROM_PTR(&alarm_pin_module) },
     { MP_ROM_QSTR(MP_QSTR_time), MP_OBJ_FROM_PTR(&alarm_time_module) },
+    #if CIRCUITPY_ALARM_TOUCH
     { MP_ROM_QSTR(MP_QSTR_touch), MP_OBJ_FROM_PTR(&alarm_touch_module) },
+    #endif
 
     { MP_ROM_QSTR(MP_QSTR_SleepMemory),   MP_OBJ_FROM_PTR(&alarm_sleep_memory_type) },
     { MP_ROM_QSTR(MP_QSTR_sleep_memory),  MP_OBJ_FROM_PTR(&alarm_sleep_memory_obj) },

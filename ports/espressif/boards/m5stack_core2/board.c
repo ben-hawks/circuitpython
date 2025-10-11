@@ -15,13 +15,11 @@
 #include "shared-bindings/board/__init__.h"
 
 #include "shared-bindings/microcontroller/Pin.h"
-#include "components/driver/gpio/include/driver/gpio.h"
-#include "components/hal/include/hal/gpio_hal.h"
+#include "driver/gpio.h"
 #include "common-hal/microcontroller/Pin.h"
 
 #include "../../pmic/axp192/axp192.h"
 
-fourwire_fourwire_obj_t board_display_obj;
 
 #define DELAY 0x80
 #define PMIC_POWER_SOURCE_USB   0

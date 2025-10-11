@@ -33,8 +33,9 @@ void bleio_packet_buffer_extend(bleio_packet_buffer_obj_t *self, uint16_t conn_h
         // the writes the client actually makes.
         return;
     }
+
     // Make room for the new value by dropping the oldest packets first.
-    while (ringbuf_size(&self->ringbuf) - ringbuf_num_filled(&self->ringbuf) < len + sizeof(uint16_t)) {
+    while (ringbuf_num_empty(&self->ringbuf) < len + sizeof(uint16_t)) {
         uint16_t packet_length;
         ringbuf_get_n(&self->ringbuf, (uint8_t *)&packet_length, sizeof(uint16_t));
         for (uint16_t i = 0; i < packet_length; i++) {
@@ -54,7 +55,10 @@ static int _write_cb(uint16_t conn_handle,
     struct ble_gatt_attr *attr,
     void *arg) {
     if (error->status != 0) {
+        #if CIRCUITPY_VERBOSE_BLE
+        // For debugging.
         mp_printf(&mp_plat_print, "write failed %d\n", error->status);
+        #endif
     }
     bleio_packet_buffer_obj_t *self = (bleio_packet_buffer_obj_t *)arg;
     queue_next_write(self);
@@ -92,6 +96,8 @@ static int queue_next_write(bleio_packet_buffer_obj_t *self) {
             // Allocate an mbuf because the functions below consume it.
             struct os_mbuf *om = ble_hs_mbuf_from_flat(self->outgoing[self->pending_index], self->pending_size);
             if (om == NULL) {
+                // We may not have any more mbufs if BLE busy. It isn't a problem (yet) so we'll
+                // just skip queueing for now.
                 return BLE_HS_ENOMEM;
             }
             size_t pending_size = self->pending_size;
@@ -157,7 +163,7 @@ void _common_hal_bleio_packet_buffer_construct(
     bleio_packet_buffer_obj_t *self, bleio_characteristic_obj_t *characteristic,
     uint32_t *incoming_buffer, size_t incoming_buffer_size,
     uint32_t *outgoing_buffer1, uint32_t *outgoing_buffer2, size_t max_packet_size,
-    void *static_handler_entry) {
+    ble_event_handler_t *static_handler_entry) {
     self->characteristic = characteristic;
     self->client = self->characteristic->service->is_remote;
     self->max_packet_size = max_packet_size;
@@ -234,17 +240,17 @@ void common_hal_bleio_packet_buffer_construct(
     uint32_t *incoming_buffer = NULL;
     if (incoming) {
         incoming_buffer_size = buffer_size * (sizeof(uint16_t) + max_packet_size);
-        incoming_buffer = m_malloc(incoming_buffer_size);
+        incoming_buffer = m_malloc_without_collect(incoming_buffer_size);
     }
 
     uint32_t *outgoing1 = NULL;
     uint32_t *outgoing2 = NULL;
     if (outgoing) {
-        outgoing1 = m_malloc(max_packet_size);
+        outgoing1 = m_malloc_without_collect(max_packet_size);
         // Only allocate the second buffer if we are doing writes with responses.
         // Without responses, we just write as quickly as we can.
         if (outgoing == CHAR_PROP_WRITE || outgoing == CHAR_PROP_INDICATE) {
-            outgoing2 = m_malloc(max_packet_size);
+            outgoing2 = m_malloc_without_collect(max_packet_size);
         }
     }
     _common_hal_bleio_packet_buffer_construct(self, characteristic,
@@ -331,7 +337,8 @@ mp_int_t common_hal_bleio_packet_buffer_write(bleio_packet_buffer_obj_t *self, c
 
     // If no writes are queued then sneak in this data.
     if (!self->packet_queued) {
-        CHECK_NIMBLE_ERROR(queue_next_write(self));
+        // This will queue up the packet even if it can't send immediately.
+        queue_next_write(self);
     }
     return num_bytes_written;
 }
@@ -429,6 +436,11 @@ void common_hal_bleio_packet_buffer_deinit(bleio_packet_buffer_obj_t *self) {
         return;
     }
     bleio_characteristic_clear_observer(self->characteristic);
+    self->characteristic = NULL;
     ble_event_remove_handler(packet_buffer_on_ble_client_evt, self);
     ringbuf_deinit(&self->ringbuf);
+}
+
+bool common_hal_bleio_packet_buffer_connected(bleio_packet_buffer_obj_t *self) {
+    return !common_hal_bleio_packet_buffer_deinited(self) && self->conn_handle != BLEIO_HANDLE_INVALID;
 }

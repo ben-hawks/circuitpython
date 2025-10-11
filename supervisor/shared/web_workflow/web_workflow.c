@@ -243,7 +243,7 @@ bool supervisor_start_web_workflow(void) {
     char password[64];
 
     os_getenv_err_t result = common_hal_os_getenv_str("CIRCUITPY_WIFI_SSID", ssid, sizeof(ssid));
-    if (result != GETENV_OK) {
+    if (result != GETENV_OK || strlen(ssid) < 1) {
         return false;
     }
 
@@ -338,7 +338,11 @@ bool supervisor_start_web_workflow(void) {
         #endif
 
         if (common_hal_socketpool_socket_get_closed(&listening)) {
+            #if CIRCUITPY_SOCKETPOOL_IPV6
+            socketpool_socket(&pool, SOCKETPOOL_AF_INET6, SOCKETPOOL_SOCK_STREAM, 0, &listening);
+            #else
             socketpool_socket(&pool, SOCKETPOOL_AF_INET, SOCKETPOOL_SOCK_STREAM, 0, &listening);
+            #endif
             common_hal_socketpool_socket_settimeout(&listening, 0);
             // Bind to any ip. (Not checking for failures)
             common_hal_socketpool_socket_bind(&listening, "", 0, web_api_port);
@@ -1261,8 +1265,15 @@ static bool _reply(socketpool_socket_obj_t *socket, _request *request) {
                     _reply_missing(socket, request);
                     return false;
                 }
-                path += strlen(vfs->str);
+                // Check if the vfs name is one character long: it must be "/" in that case.
+                // If so don't remove the mount point name. We must use an absolute path
+                // because otherwise the path will be adjusted by os.getcwd() when it's looked up.
+                if (strlen(vfs->str) != 1) {
+                    // Remove the mount point directory name, such as "/sd".
+                    path += strlen(vfs->str);
+                }
                 pathlen = strlen(path);
+
             }
             FATFS *fs = &fs_mount->fatfs;
             if (directory) {
@@ -1585,12 +1596,10 @@ void supervisor_web_workflow_background(void *data) {
         if ((!common_hal_socketpool_socket_get_connected(&active) ||
              (!active_request.in_progress && !active_request.new_socket)) &&
             !common_hal_socketpool_socket_get_closed(&listening)) {
-            uint32_t ip;
-            uint32_t port;
             if (!common_hal_socketpool_socket_get_closed(&active)) {
                 common_hal_socketpool_socket_close(&active);
             }
-            int newsoc = socketpool_socket_accept(&listening, (uint8_t *)&ip, &port, &active);
+            int newsoc = socketpool_socket_accept(&listening, NULL, &active);
             if (newsoc == -EBADF) {
                 common_hal_socketpool_socket_close(&listening);
                 break;

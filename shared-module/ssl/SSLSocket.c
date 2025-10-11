@@ -22,6 +22,8 @@
 
 #include "mbedtls/version.h"
 
+#define MP_STREAM_POLL_RDWR (MP_STREAM_POLL_RD | MP_STREAM_POLL_WR)
+
 #if defined(MBEDTLS_ERROR_C)
 #include "../../lib/mbedtls_errors/mp_mbedtls_errors.c"
 #endif
@@ -35,7 +37,7 @@
 static void mbedtls_debug(void *ctx, int level, const char *file, int line, const char *str) {
     (void)ctx;
     (void)level;
-    mp_printf(&mp_plat_print, "DBG:%s:%04d: %s\n", file, line, str);
+    mp_printf(&mp_plat_print, "DBG:%s:%04d: %s", file, line, str);
 }
 #define DEBUG_PRINT(fmt, ...) mp_printf(&mp_plat_print, "DBG:%s:%04d: " fmt "\n", __FILE__, __LINE__,##__VA_ARGS__)
 #else
@@ -63,7 +65,7 @@ static NORETURN void mbedtls_raise_error(int err) {
     // Try to allocate memory for the message
     #define ERR_STR_MAX 80  // mbedtls_strerror truncates if it doesn't fit
     mp_obj_str_t *o_str = m_new_obj_maybe(mp_obj_str_t);
-    byte *o_str_buf = m_new_maybe(byte, ERR_STR_MAX);
+    byte *o_str_buf = m_malloc_without_collect(ERR_STR_MAX);
     if (o_str == NULL || o_str_buf == NULL) {
         mp_raise_OSError(err);
     }
@@ -216,10 +218,10 @@ ssl_sslsocket_obj_t *common_hal_ssl_sslcontext_wrap_socket(ssl_sslcontext_obj_t 
         mp_raise_RuntimeError(MP_ERROR_TEXT("Invalid socket for TLS"));
     }
 
-    ssl_sslsocket_obj_t *o = m_new_obj_with_finaliser(ssl_sslsocket_obj_t);
-    o->base.type = &ssl_sslsocket_type;
+    ssl_sslsocket_obj_t *o = mp_obj_malloc_with_finaliser(ssl_sslsocket_obj_t, &ssl_sslsocket_type);
     o->ssl_context = self;
     o->sock_obj = socket;
+    o->poll_mask = 0;
 
     mp_load_method(socket, MP_QSTR_accept, o->accept_args);
     mp_load_method(socket, MP_QSTR_bind, o->bind_args);
@@ -330,7 +332,8 @@ cleanup:
     }
 }
 
-mp_uint_t common_hal_ssl_sslsocket_recv_into(ssl_sslsocket_obj_t *self, uint8_t *buf, uint32_t len) {
+mp_uint_t common_hal_ssl_sslsocket_recv_into(ssl_sslsocket_obj_t *self, uint8_t *buf, mp_uint_t len) {
+    self->poll_mask = 0;
     int ret = mbedtls_ssl_read(&self->ssl, buf, len);
     DEBUG_PRINT("recv_into mbedtls_ssl_read() -> %d\n", ret);
     if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
@@ -342,16 +345,23 @@ mp_uint_t common_hal_ssl_sslsocket_recv_into(ssl_sslsocket_obj_t *self, uint8_t 
         DEBUG_PRINT("returning %d\n", ret);
         return ret;
     }
+    if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+        self->poll_mask = MP_STREAM_POLL_WR;
+    }
     DEBUG_PRINT("raising errno [error case] %d\n", ret);
     mbedtls_raise_error(ret);
 }
 
-mp_uint_t common_hal_ssl_sslsocket_send(ssl_sslsocket_obj_t *self, const uint8_t *buf, uint32_t len) {
+mp_uint_t common_hal_ssl_sslsocket_send(ssl_sslsocket_obj_t *self, const uint8_t *buf, mp_uint_t len) {
+    self->poll_mask = 0;
     int ret = mbedtls_ssl_write(&self->ssl, buf, len);
     DEBUG_PRINT("send mbedtls_ssl_write() -> %d\n", ret);
     if (ret >= 0) {
         DEBUG_PRINT("returning %d\n", ret);
         return ret;
+    }
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+        self->poll_mask = MP_STREAM_POLL_RD;
     }
     DEBUG_PRINT("raising errno [error case] %d\n", ret);
     mbedtls_raise_error(ret);
@@ -447,4 +457,38 @@ void common_hal_ssl_sslsocket_setsockopt(ssl_sslsocket_obj_t *self, mp_obj_t lev
 
 void common_hal_ssl_sslsocket_settimeout(ssl_sslsocket_obj_t *self, mp_obj_t timeout_obj) {
     ssl_socket_settimeout(self, timeout_obj);
+}
+
+static bool poll_common(ssl_sslsocket_obj_t *self, uintptr_t arg) {
+    // Take into account that the library might have buffered data already
+    int has_pending = 0;
+    if (arg & MP_STREAM_POLL_RD) {
+        has_pending = mbedtls_ssl_check_pending(&self->ssl);
+        if (has_pending) {
+            // Shortcut if we only need to read and we have buffered data, no need to go to the underlying socket
+            return true;
+        }
+    }
+
+    // If the library signaled us that it needs reading or writing, only
+    // check that direction
+    if (self->poll_mask && (arg & MP_STREAM_POLL_RDWR)) {
+        arg = (arg & ~MP_STREAM_POLL_RDWR) | self->poll_mask;
+    }
+
+    // If direction the library needed is available, return a fake
+    // result to the caller so that it reenters a read or a write to
+    // allow the handshake to progress
+    const mp_stream_p_t *stream_p = mp_get_stream_raise(self->sock_obj, MP_STREAM_OP_IOCTL);
+    int errcode;
+    mp_int_t ret = stream_p->ioctl(self->sock_obj, MP_STREAM_POLL, arg, &errcode);
+    return ret != 0;
+}
+
+bool common_hal_ssl_sslsocket_readable(ssl_sslsocket_obj_t *self) {
+    return poll_common(self, MP_STREAM_POLL_RD);
+}
+
+bool common_hal_ssl_sslsocket_writable(ssl_sslsocket_obj_t *self) {
+    return poll_common(self, MP_STREAM_POLL_WR);
 }

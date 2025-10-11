@@ -6,9 +6,13 @@
 
 #pragma once
 
+#include "supervisor/background_callback.h"
+
 #include "freertos/FreeRTOS.h" // IWYU pragma: keep; for BaseType_t
 
-void bleio_background(void);
+void bleio_background(void *data);
+
+extern background_callback_t bleio_background_callback;
 
 // typedef struct {
 //     ble_gap_enc_key_t own_enc;
@@ -18,7 +22,7 @@ void bleio_background(void);
 
 // We assume variable length data.
 // 20 bytes max (23 - 3).
-#define GATT_MAX_DATA_LENGTH (BLE_GATT_ATT_MTU_DEFAULT - 3)
+#define GATT_MAX_DATA_LENGTH (23 - 3)
 
 #define NIMBLE_OK (0)
 
@@ -39,3 +43,6 @@ void check_notify(BaseType_t result);
 #define UNIT_1_MS  (1000)
 #define UNIT_1_25_MS  (1250)
 #define UNIT_10_MS    (10000)
+
+int bleio_gattc_read(uint16_t conn_handle, uint16_t value_handle, uint8_t *buf, size_t len);
+void bleio_gattc_write(uint16_t conn_handle, uint16_t value_handle, uint8_t *buf, size_t len);

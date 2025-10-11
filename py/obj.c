@@ -29,24 +29,39 @@
 #include <stdarg.h>
 #include <assert.h>
 
+// CIRCUITPY-CHANGE
 #include "shared/runtime/interrupt_char.h"
+#include "py/misc.h"
 #include "py/obj.h"
 #include "py/objtype.h"
 #include "py/objint.h"
 #include "py/objstr.h"
+// CIRCUITPY-CHANGE
 #include "py/qstr.h"
 #include "py/runtime.h"
-#include "py/stackctrl.h"
+#include "py/cstack.h"
 #include "py/stream.h" // for mp_obj_print
 
+// CIRCUITPY-CHANGE
 #include "supervisor/shared/stack.h"
 
 // Allocates an object and also sets type, for mp_obj_malloc{,_var} macros.
 MP_NOINLINE void *mp_obj_malloc_helper(size_t num_bytes, const mp_obj_type_t *type) {
-    mp_obj_base_t *base = (mp_obj_base_t *)m_malloc(num_bytes);
+    // CIRCUITPY-CHANGE
+    mp_obj_base_t *base = (mp_obj_base_t *)m_malloc_helper(num_bytes, M_MALLOC_RAISE_ERROR | M_MALLOC_COLLECT);
     base->type = type;
     return base;
 }
+
+#if MICROPY_ENABLE_FINALISER
+// Allocates an object and also sets type, for mp_obj_malloc{,_var}_with_finaliser macros.
+MP_NOINLINE void *mp_obj_malloc_with_finaliser_helper(size_t num_bytes, const mp_obj_type_t *type) {
+    // CIRCUITPY-CHANGE
+    mp_obj_base_t *base = (mp_obj_base_t *)m_malloc_helper(num_bytes, M_MALLOC_RAISE_ERROR | M_MALLOC_COLLECT | M_MALLOC_WITH_FINALISER);
+    base->type = type;
+    return base;
+}
+#endif
 
 const mp_obj_type_t *MICROPY_WRAP_MP_OBJ_GET_TYPE(mp_obj_get_type)(mp_const_obj_t o_in) {
     #if MICROPY_OBJ_IMMEDIATE_OBJS && MICROPY_OBJ_REPR == MICROPY_OBJ_REPR_A
@@ -113,7 +128,7 @@ const char *mp_obj_get_type_str(mp_const_obj_t o_in) {
 
 void mp_obj_print_helper(const mp_print_t *print, mp_obj_t o_in, mp_print_kind_t kind) {
     // There can be data structures nested too deep, or just recursive
-    MP_STACK_CHECK();
+    mp_cstack_check();
     // CIRCUITPY-CHANGE
     #ifdef RUN_BACKGROUND_TASKS
     RUN_BACKGROUND_TASKS;
@@ -132,6 +147,13 @@ void mp_obj_print_helper(const mp_print_t *print, mp_obj_t o_in, mp_print_kind_t
     }
     #endif
     const mp_obj_type_t *type = mp_obj_get_type(o_in);
+    // CIRCUITPY-CHANGE: Diagnose json.dump on invalid types
+    #if MICROPY_PY_JSON
+    if (kind == PRINT_JSON && !(type->flags & MP_TYPE_FLAG_PRINT_JSON)) {
+        mp_raise_msg_varg(&mp_type_TypeError,
+            MP_ERROR_TEXT("can't convert %q to %q"), type->name, MP_QSTR_json);
+    }
+    #endif
     if (MP_OBJ_TYPE_HAS_SLOT(type, print)) {
         MP_OBJ_TYPE_GET_SLOT(type, print)((mp_print_t *)print, o_in, kind);
     } else {
@@ -144,17 +166,29 @@ void mp_obj_print(mp_obj_t o_in, mp_print_kind_t kind) {
 }
 
 // CIRCUITPY-CHANGE
+#if MICROPY_CPYTHON_EXCEPTION_CHAIN
+static mp_obj_t mp_load_attr_or_none(mp_obj_t base, qstr attr) {
+    mp_obj_t dest[2];
+    mp_load_method_protected(base, attr, dest, true);
+    return dest[0] == MP_OBJ_NULL ? mp_const_none : dest[0];
+}
+#endif
+
+// CIRCUITPY-CHANGE
 static void mp_obj_print_inner_exception(const mp_print_t *print, mp_obj_t self_in, mp_int_t limit) {
     #if MICROPY_CPYTHON_EXCEPTION_CHAIN
     mp_obj_exception_t *self = mp_obj_exception_get_native(self_in);
     mp_rom_error_text_t msg = MP_ERROR_TEXT("During handling of the above exception, another exception occurred:");
-    mp_obj_exception_t *inner = NULL;
-    if (self->cause) {
-        msg = MP_ERROR_TEXT("The above exception was the direct cause of the following exception:");
-        inner = self->cause;
-    } else if (!self->suppress_context) {
-        inner = self->context;
+    mp_obj_t inner_obj = mp_const_none;
+    if (!self->suppress_context) {
+        inner_obj = mp_load_attr_or_none(self_in, MP_QSTR___context__);
     }
+    if (inner_obj == mp_const_none) {
+        msg = MP_ERROR_TEXT("The above exception was the direct cause of the following exception:");
+        inner_obj = mp_load_attr_or_none(self_in, MP_QSTR___cause__);
+    }
+    mp_obj_exception_t *inner = mp_obj_is_exception_instance(inner_obj) ?
+        mp_obj_exception_get_native(inner_obj) : NULL;
     if (inner && !inner->marked) {
         inner->marked = true;
         mp_obj_print_exception_with_limit(print, MP_OBJ_FROM_PTR(inner), limit);
@@ -232,6 +266,7 @@ void mp_obj_print_exception(const mp_print_t *print, mp_obj_t exc) {
     mp_obj_print_exception_with_limit(print, exc, 0);
 }
 
+// CIRCUITPY-CHANGE
 bool PLACE_IN_ITCM(mp_obj_is_true)(mp_obj_t arg) {
     if (arg == mp_const_false) {
         return 0;
@@ -478,6 +513,7 @@ void mp_obj_get_complex(mp_obj_t arg, mp_float_t *real, mp_float_t *imag) {
         #if MICROPY_ERROR_REPORTING <= MICROPY_ERROR_REPORTING_TERSE
         mp_raise_TypeError(MP_ERROR_TEXT("can't convert to complex"));
         #else
+        // CIRCUITPY-CHANGE: more specific mp_raise
         mp_raise_TypeError_varg(
             MP_ERROR_TEXT("can't convert %s to complex"), mp_obj_get_type_str(arg));
         #endif
@@ -497,6 +533,7 @@ void mp_obj_get_array(mp_obj_t o, size_t *len, mp_obj_t **items) {
         #if MICROPY_ERROR_REPORTING <= MICROPY_ERROR_REPORTING_TERSE
         mp_raise_TypeError(MP_ERROR_TEXT("expected tuple/list"));
         #else
+        // CIRCUITPY-CHANGE: more specific mp_raise
         mp_raise_TypeError_varg(
             MP_ERROR_TEXT("object '%s' isn't a tuple or list"), mp_obj_get_type_str(o));
         #endif
@@ -575,6 +612,7 @@ mp_obj_t mp_obj_len(mp_obj_t o_in) {
         #if MICROPY_ERROR_REPORTING <= MICROPY_ERROR_REPORTING_TERSE
         mp_raise_TypeError(MP_ERROR_TEXT("object has no len"));
         #else
+        // CIRCUITPY-CHANGE: more specific mp_raise
         mp_raise_TypeError_varg(
             MP_ERROR_TEXT("object of type '%s' has no len()"), mp_obj_get_type_str(o_in));
         #endif
@@ -607,6 +645,7 @@ mp_obj_t mp_obj_subscr(mp_obj_t base, mp_obj_t index, mp_obj_t value) {
     const mp_obj_type_t *type = mp_obj_get_type(base);
     if (MP_OBJ_TYPE_HAS_SLOT(type, subscr)) {
         mp_obj_t ret = MP_OBJ_TYPE_GET_SLOT(type, subscr)(base, index, value);
+        // CIRCUITPY-CHANGE
         // May have called port specific C code. Make sure it didn't mess up the heap.
         assert_heap_ok();
         if (ret != MP_OBJ_NULL) {
@@ -618,6 +657,7 @@ mp_obj_t mp_obj_subscr(mp_obj_t base, mp_obj_t index, mp_obj_t value) {
         #if MICROPY_ERROR_REPORTING <= MICROPY_ERROR_REPORTING_TERSE
         mp_raise_TypeError(MP_ERROR_TEXT("object doesn't support item deletion"));
         #else
+        // CIRCUITPY-CHANGE: more specific mp_raise
         mp_raise_TypeError_varg(
             MP_ERROR_TEXT("'%s' object doesn't support item deletion"), mp_obj_get_type_str(base));
         #endif
@@ -625,6 +665,7 @@ mp_obj_t mp_obj_subscr(mp_obj_t base, mp_obj_t index, mp_obj_t value) {
         #if MICROPY_ERROR_REPORTING <= MICROPY_ERROR_REPORTING_TERSE
         mp_raise_TypeError(MP_ERROR_TEXT("object isn't subscriptable"));
         #else
+        // CIRCUITPY-CHANGE: more specific mp_raise
         mp_raise_TypeError_varg(
             MP_ERROR_TEXT("'%s' object isn't subscriptable"), mp_obj_get_type_str(base));
         #endif
@@ -632,6 +673,7 @@ mp_obj_t mp_obj_subscr(mp_obj_t base, mp_obj_t index, mp_obj_t value) {
         #if MICROPY_ERROR_REPORTING <= MICROPY_ERROR_REPORTING_TERSE
         mp_raise_TypeError(MP_ERROR_TEXT("object doesn't support item assignment"));
         #else
+        // CIRCUITPY-CHANGE: more specific mp_raise
         mp_raise_TypeError_varg(
             MP_ERROR_TEXT("'%s' object doesn't support item assignment"), mp_obj_get_type_str(base));
         #endif
@@ -654,7 +696,7 @@ typedef struct {
     mp_int_t cur;
 } mp_obj_generic_subscript_it_t;
 
-STATIC mp_obj_t generic_subscript_it_iternext(mp_obj_t self_in) {
+static mp_obj_t generic_subscript_it_iternext(mp_obj_t self_in) {
     mp_obj_generic_subscript_it_t *self = MP_OBJ_TO_PTR(self_in);
     const mp_obj_type_t *type = mp_obj_get_type(self->obj);
     mp_obj_t current_length = MP_OBJ_TYPE_GET_SLOT(type, unary_op)(MP_UNARY_OP_LEN, self->obj);

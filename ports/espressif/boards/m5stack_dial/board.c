@@ -13,7 +13,6 @@
 #include "shared-module/displayio/mipi_constants.h"
 #include "shared-bindings/board/__init__.h"
 
-fourwire_fourwire_obj_t board_display_obj;
 
 uint8_t display_init_sequence[] = {
     0xFE, 0x00, // Inter Register Enable1 (FEh)
@@ -93,11 +92,10 @@ void board_init(void) {
 }
 
 bool espressif_board_reset_pin_number(gpio_num_t pin_number) {
-    // Hold pind must be set high to avoid a power off when battery powered
+    // Hold pin must be set high to avoid a power off when battery powered
     if (pin_number == 46) {
         // Turn on hold output
-        gpio_set_direction(46, GPIO_MODE_DEF_OUTPUT);
-        gpio_set_level(46, true);
+        config_pin_as_output_with_level(pin_number, true);
         return true;
     }
     return false;

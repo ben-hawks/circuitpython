@@ -35,6 +35,9 @@ void check_nrf_error(uint32_t err_code) {
         case NRF_ERROR_INVALID_PARAM:
             mp_raise_ValueError(MP_ERROR_TEXT("Invalid BLE parameter"));
             return;
+        case NRF_ERROR_INVALID_STATE:
+            mp_raise_bleio_BluetoothError(MP_ERROR_TEXT("Invalid state"));
+            return;
         case BLE_ERROR_INVALID_CONN_HANDLE:
             mp_raise_ConnectionError(MP_ERROR_TEXT("Not connected"));
             return;
@@ -74,10 +77,15 @@ void check_sec_status(uint8_t sec_status) {
     }
 }
 
-void bleio_user_reset() {
-    // Stop any user scanning or advertising.
-    common_hal_bleio_adapter_stop_scan(&common_hal_bleio_adapter_obj);
-    common_hal_bleio_adapter_stop_advertising(&common_hal_bleio_adapter_obj);
+void common_hal_bleio_init(void) {
+}
+
+void bleio_user_reset(void) {
+    if (common_hal_bleio_adapter_get_enabled(&common_hal_bleio_adapter_obj)) {
+        // Stop any user scanning or advertising.
+        common_hal_bleio_adapter_stop_scan(&common_hal_bleio_adapter_obj);
+        common_hal_bleio_adapter_stop_advertising(&common_hal_bleio_adapter_obj);
+    }
 
     ble_drv_remove_heap_handlers();
 
@@ -86,7 +94,7 @@ void bleio_user_reset() {
 }
 
 // Turn off BLE on a reset or reload.
-void bleio_reset() {
+void bleio_reset(void) {
     // Set this explicitly to save data.
     common_hal_bleio_adapter_obj.base.type = &bleio_adapter_type;
     if (!common_hal_bleio_adapter_get_enabled(&common_hal_bleio_adapter_obj)) {
@@ -248,4 +256,5 @@ void bleio_background(void) {
 
 void common_hal_bleio_gc_collect(void) {
     bleio_adapter_gc_collect(&common_hal_bleio_adapter_obj);
+    ble_drv_gc_collect();
 }

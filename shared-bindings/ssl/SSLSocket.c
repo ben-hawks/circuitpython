@@ -10,10 +10,11 @@
 #include <string.h>
 
 #include "shared/runtime/context_manager_helpers.h"
-#include "py/objtuple.h"
-#include "py/objlist.h"
-#include "py/runtime.h"
 #include "py/mperrno.h"
+#include "py/objlist.h"
+#include "py/objtuple.h"
+#include "py/runtime.h"
+#include "py/stream.h"
 
 #include "shared/netutils/netutils.h"
 
@@ -28,18 +29,21 @@
 //|     def __hash__(self) -> int:
 //|         """Returns a hash for the Socket."""
 //|         ...
+//|
 // Provided by automatic inclusion of hash()
 // https://github.com/micropython/micropython/pull/10348
 
 //|     def __enter__(self) -> SSLSocket:
 //|         """No-op used by Context Managers."""
 //|         ...
+//|
 //  Provided by context manager helper.
 
 //|     def __exit__(self) -> None:
 //|         """Automatically closes the Socket when exiting a context. See
 //|         :ref:`lifetime-and-contextmanagers` for more info."""
 //|         ...
+//|
 static mp_obj_t ssl_sslsocket___exit__(size_t n_args, const mp_obj_t *args) {
     (void)n_args;
     common_hal_ssl_sslsocket_close(args[0]);
@@ -51,6 +55,7 @@ static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ssl_sslsocket___exit___obj, 4, 4, ssl
 //|         """Accept a connection on a listening socket of type SOCK_STREAM,
 //|         creating a new socket of type SOCK_STREAM.
 //|         Returns a tuple of (new_socket, remote_address)"""
+//|
 static mp_obj_t ssl_sslsocket_accept(mp_obj_t self_in) {
     ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(self_in);
     return common_hal_ssl_sslsocket_accept(self);
@@ -62,6 +67,7 @@ static MP_DEFINE_CONST_FUN_OBJ_1(ssl_sslsocket_accept_obj, ssl_sslsocket_accept)
 //|
 //|         :param ~tuple address: tuple of (remote_address, remote_port)"""
 //|         ...
+//|
 static mp_obj_t ssl_sslsocket_bind(mp_obj_t self_in, mp_obj_t addr_in) {
     ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(self_in);
 
@@ -75,6 +81,7 @@ static MP_DEFINE_CONST_FUN_OBJ_2(ssl_sslsocket_bind_obj, ssl_sslsocket_bind);
 
 //|     def close(self) -> None:
 //|         """Closes this Socket"""
+//|
 static mp_obj_t ssl_sslsocket_close(mp_obj_t self_in) {
     ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(self_in);
     common_hal_ssl_sslsocket_close(self);
@@ -87,6 +94,7 @@ static MP_DEFINE_CONST_FUN_OBJ_1(ssl_sslsocket_close_obj, ssl_sslsocket_close);
 //|
 //|         :param ~tuple address: tuple of (remote_address, remote_port)"""
 //|         ...
+//|
 static mp_obj_t ssl_sslsocket_connect(mp_obj_t self_in, mp_obj_t addr_in) {
     ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(self_in);
     common_hal_ssl_sslsocket_connect(self, addr_in);
@@ -100,6 +108,7 @@ static MP_DEFINE_CONST_FUN_OBJ_2(ssl_sslsocket_connect_obj, ssl_sslsocket_connec
 //|
 //|         :param ~int backlog: length of backlog queue for waiting connetions"""
 //|         ...
+//|
 static mp_obj_t ssl_sslsocket_listen(mp_obj_t self_in, mp_obj_t backlog_in) {
     ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(self_in);
 
@@ -123,6 +132,7 @@ static MP_DEFINE_CONST_FUN_OBJ_2(ssl_sslsocket_listen_obj, ssl_sslsocket_listen)
 //|         :param bytearray buffer: buffer to receive into
 //|         :param int bufsize: optionally, a maximum number of bytes to read."""
 //|         ...
+//|
 static mp_obj_t ssl_sslsocket_recv_into(size_t n_args, const mp_obj_t *args) {
     ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     if (common_hal_ssl_sslsocket_get_closed(self)) {
@@ -161,6 +171,7 @@ static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ssl_sslsocket_recv_into_obj, 2, 3, ss
 //|
 //|         :param ~bytes bytes: some bytes to send"""
 //|         ...
+//|
 static mp_obj_t ssl_sslsocket_send(mp_obj_t self_in, mp_obj_t buf_in) {
     ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(self_in);
     if (common_hal_ssl_sslsocket_get_closed(self)) {
@@ -203,6 +214,7 @@ static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ssl_sslsocket_setsockopt_obj, 4, 4, s
 //|         :param ~int value: timeout in seconds.  0 means non-blocking.  None means block indefinitely.
 //|         """
 //|         ...
+//|
 static mp_obj_t ssl_sslsocket_settimeout(mp_obj_t self_in, mp_obj_t timeout_in) {
     ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(self_in);
     common_hal_ssl_sslsocket_settimeout(self, timeout_in);
@@ -215,6 +227,7 @@ static MP_DEFINE_CONST_FUN_OBJ_2(ssl_sslsocket_settimeout_obj, ssl_sslsocket_set
 //|
 //|         :param ~bool flag: False means non-blocking, True means block indefinitely."""
 //|         ...
+//|
 //|
 // method socket.setblocking(flag)
 static mp_obj_t ssl_sslsocket_setblocking(mp_obj_t self_in, mp_obj_t blocking) {
@@ -247,9 +260,69 @@ static const mp_rom_map_elem_t ssl_sslsocket_locals_dict_table[] = {
 
 static MP_DEFINE_CONST_DICT(ssl_sslsocket_locals_dict, ssl_sslsocket_locals_dict_table);
 
+typedef mp_uint_t (*readwrite_func)(ssl_sslsocket_obj_t *, const uint8_t *, mp_uint_t);
+
+static mp_int_t readwrite_common(mp_obj_t self_in, readwrite_func fn, const uint8_t *buf, size_t size, int *errorcode) {
+    ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_int_t ret = -EIO;
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        ret = fn(self, buf, size);
+        nlr_pop();
+    } else {
+        mp_obj_t exc = MP_OBJ_FROM_PTR(nlr.ret_val);
+        if (nlr_push(&nlr) == 0) {
+            ret = -mp_obj_get_int(mp_load_attr(exc, MP_QSTR_errno));
+            nlr_pop();
+        }
+    }
+    if (ret < 0) {
+        *errorcode = -ret;
+        return MP_STREAM_ERROR;
+    }
+    return ret;
+}
+
+static mp_uint_t sslsocket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int *errorcode) {
+    return readwrite_common(self_in, (readwrite_func)common_hal_ssl_sslsocket_recv_into, buf, size, errorcode);
+}
+
+static mp_uint_t sslsocket_write(mp_obj_t self_in, const void *buf, mp_uint_t size, int *errorcode) {
+    return readwrite_common(self_in, common_hal_ssl_sslsocket_send, buf, size, errorcode);
+}
+
+static mp_uint_t sslsocket_ioctl(mp_obj_t self_in, mp_uint_t request, mp_uint_t arg, int *errcode) {
+    ssl_sslsocket_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    mp_uint_t ret;
+    if (request == MP_STREAM_POLL) {
+        mp_uint_t flags = arg;
+        ret = 0;
+        if ((flags & MP_STREAM_POLL_RD) && common_hal_ssl_sslsocket_readable(self) > 0) {
+            ret |= MP_STREAM_POLL_RD;
+        }
+        if ((flags & MP_STREAM_POLL_WR) && common_hal_ssl_sslsocket_writable(self)) {
+            ret |= MP_STREAM_POLL_WR;
+        }
+    } else {
+        *errcode = MP_EINVAL;
+        ret = MP_STREAM_ERROR;
+    }
+    return ret;
+}
+
+
+static const mp_stream_p_t sslsocket_stream_p = {
+    .read = sslsocket_read,
+    .write = sslsocket_write,
+    .ioctl = sslsocket_ioctl,
+    .is_text = false,
+};
+
+
 MP_DEFINE_CONST_OBJ_TYPE(
     ssl_sslsocket_type,
     MP_QSTR_SSLSocket,
     MP_TYPE_FLAG_NONE,
-    locals_dict, &ssl_sslsocket_locals_dict
+    locals_dict, &ssl_sslsocket_locals_dict,
+    protocol, &sslsocket_stream_p
     );

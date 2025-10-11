@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "supervisor/port.h"
+#include "shared-bindings/wifi/PowerManagement.h"
 #include "shared-bindings/wifi/Radio.h"
 #include "shared-bindings/wifi/Network.h"
 
@@ -21,6 +22,7 @@
 #include "shared-bindings/wifi/AuthMode.h"
 #include "shared-bindings/time/__init__.h"
 #include "shared-module/ipaddress/__init__.h"
+#include "common-hal/socketpool/__init__.h"
 
 #include "lwip/sys.h"
 #include "lwip/dns.h"
@@ -106,6 +108,41 @@ void common_hal_wifi_radio_set_tx_power(wifi_radio_obj_t *self, const mp_float_t
     cyw43_ioctl(&cyw43_state, CYW43_IOCTL_SET_VAR, 9 + 4, buf, CYW43_ITF_AP);
 }
 
+wifi_power_management_t common_hal_wifi_radio_get_power_management(wifi_radio_obj_t *self) {
+    uint32_t pm_value = cyw43_get_power_management_value();
+
+    switch (pm_value) {
+        case CONST_CYW43_PERFORMANCE_PM:
+            return POWER_MANAGEMENT_MIN;
+        case CONST_CYW43_AGGRESSIVE_PM:
+            return POWER_MANAGEMENT_MAX;
+        case CONST_CYW43_NONE_PM:
+            return POWER_MANAGEMENT_NONE;
+        default:
+            return POWER_MANAGEMENT_UNKNOWN;
+    }
+}
+
+
+void common_hal_wifi_radio_set_power_management(wifi_radio_obj_t *self, wifi_power_management_t power_management) {
+    uint32_t pm_setting = CONST_CYW43_DEFAULT_PM;
+    switch (power_management) {
+        case POWER_MANAGEMENT_MIN:
+            pm_setting = CONST_CYW43_PERFORMANCE_PM;
+            break;
+        case POWER_MANAGEMENT_MAX:
+            pm_setting = CONST_CYW43_AGGRESSIVE_PM;
+            break;
+        case POWER_MANAGEMENT_NONE:
+            pm_setting = CONST_CYW43_NONE_PM;
+            break;
+        default:
+            // Should not get here.
+            break;
+    }
+    cyw43_set_power_management_value(pm_setting);
+}
+
 mp_obj_t common_hal_wifi_radio_get_mac_address_ap(wifi_radio_obj_t *self) {
     return common_hal_wifi_radio_get_mac_address(self);
 }
@@ -120,7 +157,7 @@ mp_obj_t common_hal_wifi_radio_start_scanning_networks(wifi_radio_obj_t *self, u
         mp_raise_RuntimeError(MP_ERROR_TEXT("Already scanning for wifi networks"));
     }
     if (!common_hal_wifi_radio_get_enabled(self)) {
-        mp_raise_RuntimeError(MP_ERROR_TEXT("Wifi is not enabled"));
+        mp_raise_RuntimeError(MP_ERROR_TEXT("WiFi is not enabled"));
     }
     wifi_scannednetworks_obj_t *scan = mp_obj_malloc(wifi_scannednetworks_obj_t, &wifi_scannednetworks_type);
     mp_obj_t args[] = { mp_const_empty_tuple, MP_OBJ_NEW_SMALL_INT(16) };
@@ -156,7 +193,7 @@ void common_hal_wifi_radio_stop_station(wifi_radio_obj_t *self) {
 
 void common_hal_wifi_radio_start_ap(wifi_radio_obj_t *self, uint8_t *ssid, size_t ssid_len, uint8_t *password, size_t password_len, uint8_t channel, uint32_t authmode, uint8_t max_connections) {
     if (!common_hal_wifi_radio_get_enabled(self)) {
-        mp_raise_RuntimeError(MP_ERROR_TEXT("Wifi is not enabled"));
+        mp_raise_RuntimeError(MP_ERROR_TEXT("WiFi is not enabled"));
     }
 
     /* TODO: If the AP is stopped once it cannot be restarted.
@@ -206,7 +243,7 @@ bool common_hal_wifi_radio_get_ap_active(wifi_radio_obj_t *self) {
 
 void common_hal_wifi_radio_stop_ap(wifi_radio_obj_t *self) {
     if (!common_hal_wifi_radio_get_enabled(self)) {
-        mp_raise_RuntimeError(MP_ERROR_TEXT("wifi is not enabled"));
+        mp_raise_RuntimeError(MP_ERROR_TEXT("WiFi is not enabled"));
     }
 
     cyw43_arch_disable_ap_mode();
@@ -284,7 +321,7 @@ static bool connection_unchanged(wifi_radio_obj_t *self, const uint8_t *ssid, si
 
 wifi_radio_error_t common_hal_wifi_radio_connect(wifi_radio_obj_t *self, uint8_t *ssid, size_t ssid_len, uint8_t *password, size_t password_len, uint8_t channel, mp_float_t timeout, uint8_t *bssid, size_t bssid_len) {
     if (!common_hal_wifi_radio_get_enabled(self)) {
-        mp_raise_RuntimeError(MP_ERROR_TEXT("Wifi is not enabled"));
+        mp_raise_RuntimeError(MP_ERROR_TEXT("WiFi is not enabled"));
     }
 
     if (ssid_len > 32) {
@@ -405,8 +442,15 @@ void common_hal_wifi_radio_set_ipv4_dns(wifi_radio_obj_t *self, mp_obj_t ipv4_dn
     dns_setserver(0, &addr);
 }
 
-void common_hal_wifi_radio_start_dhcp_client(wifi_radio_obj_t *self) {
-    dhcp_start(NETIF_STA);
+void common_hal_wifi_radio_start_dhcp_client(wifi_radio_obj_t *self, bool ipv4, bool ipv6) {
+    if (ipv4) {
+        dhcp_start(NETIF_STA);
+    } else {
+        dhcp_stop(NETIF_STA);
+    }
+    if (ipv6) {
+        mp_raise_NotImplementedError_varg(MP_ERROR_TEXT("%q"), MP_QSTR_ipv6);
+    }
 }
 
 void common_hal_wifi_radio_stop_dhcp_client(wifi_radio_obj_t *self) {
@@ -481,7 +525,11 @@ ping_recv(void *arg, struct raw_pcb *pcb, struct pbuf *p, const ip_addr_t *addr)
 mp_int_t common_hal_wifi_radio_ping(wifi_radio_obj_t *self, mp_obj_t ip_address, mp_float_t timeout) {
     ping_time = sys_now();
     ip_addr_t ping_addr;
-    ipaddress_ipaddress_to_lwip(ip_address, &ping_addr);
+    if (mp_obj_is_str(ip_address)) {
+        socketpool_resolve_host_raise(mp_obj_str_get_str(ip_address), &ping_addr);
+    } else {
+        ipaddress_ipaddress_to_lwip(ip_address, &ping_addr);
+    }
 
     struct raw_pcb *ping_pcb;
     MICROPY_PY_LWIP_ENTER
@@ -521,4 +569,48 @@ mp_int_t common_hal_wifi_radio_ping(wifi_radio_obj_t *self, mp_obj_t ip_address,
 void common_hal_wifi_radio_gc_collect(wifi_radio_obj_t *self) {
     // Only bother to scan the actual object references.
     gc_collect_ptr(self->current_scan);
+}
+
+mp_obj_t common_hal_wifi_radio_get_addresses(wifi_radio_obj_t *self) {
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP) {
+        return mp_const_empty_tuple;
+    }
+    mp_obj_t args[] = {
+        socketpool_ip_addr_to_str(&NETIF_STA->ip_addr),
+    };
+    return mp_obj_new_tuple(1, args);
+}
+
+mp_obj_t common_hal_wifi_radio_get_addresses_ap(wifi_radio_obj_t *self) {
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_AP) != CYW43_LINK_UP) {
+        return mp_const_empty_tuple;
+    }
+    mp_obj_t args[] = {
+        socketpool_ip_addr_to_str(&NETIF_AP->ip_addr),
+    };
+    return mp_obj_new_tuple(MP_ARRAY_SIZE(args), args);
+}
+
+mp_obj_t common_hal_wifi_radio_get_dns(wifi_radio_obj_t *self) {
+    const ip_addr_t *dns_addr = dns_getserver(0);
+    if (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP || dns_addr->addr == 0) {
+        return mp_const_empty_tuple;
+    }
+    mp_obj_t args[] = {
+        socketpool_ip_addr_to_str(dns_addr),
+    };
+    return mp_obj_new_tuple(MP_ARRAY_SIZE(args), args);
+}
+
+void common_hal_wifi_radio_set_dns(wifi_radio_obj_t *self, mp_obj_t dns_addrs_obj) {
+    mp_int_t len = mp_obj_get_int(mp_obj_len(dns_addrs_obj));
+    mp_arg_validate_length_max(len, 1, MP_QSTR_dns);
+    ip_addr_t addr;
+    if (len == 0) {
+        addr.addr = IPADDR_NONE;
+    } else {
+        mp_obj_t dns_addr_obj = mp_obj_subscr(dns_addrs_obj, MP_OBJ_NEW_SMALL_INT(0), MP_OBJ_SENTINEL);
+        socketpool_resolve_host_raise(mp_obj_str_get_str(dns_addr_obj), &addr);
+    }
+    dns_setserver(0, &addr);
 }

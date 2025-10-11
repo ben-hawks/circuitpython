@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "py/runtime.h"
+#include "shared/runtime/interrupt_char.h"
 
 #include "shared-bindings/_bleio/__init__.h"
 #include "shared-bindings/_bleio/Characteristic.h"
@@ -14,11 +15,11 @@
 #include "shared-bindings/_bleio/Descriptor.h"
 #include "shared-bindings/_bleio/PacketBuffer.h"
 #include "shared-bindings/_bleio/Service.h"
+#include "shared-bindings/time/__init__.h"
+#include "supervisor/shared/safe_mode.h"
 
 #include "common-hal/_bleio/Adapter.h"
 #include "common-hal/_bleio/Service.h"
-// #include "common-hal/_bleio/bonding.h"
-
 
 static int characteristic_on_ble_gap_evt(struct ble_gap_event *event, void *param);
 
@@ -35,7 +36,7 @@ void common_hal_bleio_characteristic_construct(bleio_characteristic_obj_t *self,
     self->props = props;
     self->read_perm = read_perm;
     self->write_perm = write_perm;
-    self->observer = NULL;
+    self->observer = mp_const_none;
 
     // Map CP's property values to Nimble's flag values.
     self->flags = 0;
@@ -57,21 +58,42 @@ void common_hal_bleio_characteristic_construct(bleio_characteristic_obj_t *self,
     if ((props & CHAR_PROP_WRITE_NO_RESPONSE) != 0) {
         self->flags |= BLE_GATT_CHR_F_WRITE_NO_RSP;
     }
+    if (read_perm == SECURITY_MODE_ENC_WITH_MITM || write_perm == SECURITY_MODE_ENC_WITH_MITM ||
+        read_perm == SECURITY_MODE_SIGNED_WITH_MITM || write_perm == SECURITY_MODE_SIGNED_WITH_MITM) {
+        mp_raise_NotImplementedError(MP_ERROR_TEXT("MITM security not supported"));
+    }
+    if (read_perm == SECURITY_MODE_ENC_NO_MITM) {
+        self->flags |= BLE_GATT_CHR_F_READ_ENC;
+    }
+    if (read_perm == SECURITY_MODE_SIGNED_NO_MITM) {
+        self->flags |= BLE_GATT_CHR_F_READ_AUTHEN;
+    }
+    if (write_perm == SECURITY_MODE_ENC_NO_MITM) {
+        self->flags |= BLE_GATT_CHR_F_WRITE_ENC;
+    }
+    if (write_perm == SECURITY_MODE_SIGNED_NO_MITM) {
+        self->flags |= BLE_GATT_CHR_F_WRITE_AUTHEN;
+    }
+
+    // If max_length is 0, then no storage is allocated.
+    if (max_length > 0) {
+        if (gc_alloc_possible()) {
+            self->current_value = m_malloc_without_collect(max_length);
+        } else {
+            self->current_value = port_malloc(max_length, false);
+            if (self->current_value == NULL) {
+                reset_into_safe_mode(SAFE_MODE_NO_HEAP);
+            }
+        }
+    }
+    self->current_value_alloc = max_length;
+    self->current_value_len = 0;
+
+    self->max_length = max_length;
+    self->fixed_length = fixed_length;
 
     if (initial_value_bufinfo != NULL) {
-        // Copy the initial value if it's on the heap. Otherwise it's internal and we may not be able
-        // to allocate.
-        self->current_value_len = initial_value_bufinfo->len;
-        if (gc_alloc_possible()) {
-            self->current_value = m_malloc(max_length);
-            self->current_value_alloc = max_length;
-            if (gc_nbytes(initial_value_bufinfo->buf) > 0) {
-                memcpy(self->current_value, initial_value_bufinfo->buf, self->current_value_len);
-            }
-        } else {
-            self->current_value = initial_value_bufinfo->buf;
-            assert(self->current_value_len == max_length);
-        }
+        common_hal_bleio_characteristic_set_value(self, initial_value_bufinfo);
     }
 
     if (gc_alloc_possible()) {
@@ -80,9 +102,6 @@ void common_hal_bleio_characteristic_construct(bleio_characteristic_obj_t *self,
         self->descriptor_list = NULL;
     }
 
-    self->max_length = max_length;
-    self->fixed_length = fixed_length;
-
     if (service->is_remote) {
         // If the service is remote, we're buffering incoming notifications and indications.
         self->handle = handle;
@@ -90,6 +109,28 @@ void common_hal_bleio_characteristic_construct(bleio_characteristic_obj_t *self,
     } else {
         common_hal_bleio_service_add_characteristic(self->service, self, initial_value_bufinfo, user_description);
     }
+}
+
+bool common_hal_bleio_characteristic_deinited(bleio_characteristic_obj_t *self) {
+    return self->handle == BLEIO_HANDLE_INVALID;
+}
+
+void common_hal_bleio_characteristic_deinit(bleio_characteristic_obj_t *self) {
+    if (common_hal_bleio_characteristic_deinited(self)) {
+        return;
+    }
+    if (self->current_value != NULL) {
+        if (gc_ptr_on_heap(self->current_value)) {
+            m_free(self->current_value);
+        } else {
+            port_free(self->current_value);
+        }
+
+        self->current_value = NULL;
+    }
+
+    // Used to indicate deinit.
+    self->handle = BLEIO_HANDLE_INVALID;
 }
 
 mp_obj_tuple_t *common_hal_bleio_characteristic_get_descriptors(bleio_characteristic_obj_t *self) {
@@ -103,36 +144,7 @@ bleio_service_obj_t *common_hal_bleio_characteristic_get_service(bleio_character
     return self->service;
 }
 
-typedef struct {
-    TaskHandle_t task;
-    uint8_t *buf;
-    uint16_t len;
-} _read_info_t;
 
-static int _read_cb(uint16_t conn_handle,
-    const struct ble_gatt_error *error,
-    struct ble_gatt_attr *attr,
-    void *arg) {
-    _read_info_t *read_info = (_read_info_t *)arg;
-    switch (error->status) {
-        case 0: {
-            int len = MIN(read_info->len, OS_MBUF_PKTLEN(attr->om));
-            os_mbuf_copydata(attr->om, attr->offset, len, read_info->buf);
-            read_info->len = len;
-        }
-            MP_FALLTHROUGH;
-
-        default:
-            #if CIRCUITPY_VERBOSE_BLE
-            // For debugging.
-            mp_printf(&mp_plat_print, "Read status: %d\n", error->status);
-            #endif
-            xTaskNotify(read_info->task, error->status, eSetValueWithOverwrite);
-            break;
-    }
-
-    return 0;
-}
 
 size_t common_hal_bleio_characteristic_get_value(bleio_characteristic_obj_t *self, uint8_t *buf, size_t len) {
     // Do GATT operations only if this characteristic has been added to a registered service.
@@ -141,16 +153,7 @@ size_t common_hal_bleio_characteristic_get_value(bleio_characteristic_obj_t *sel
     }
     uint16_t conn_handle = bleio_connection_get_conn_handle(self->service->connection);
     if (common_hal_bleio_service_get_is_remote(self->service)) {
-        _read_info_t read_info = {
-            .task = xTaskGetCurrentTaskHandle(),
-            .buf = buf,
-            .len = len
-        };
-        CHECK_NIMBLE_ERROR(ble_gattc_read(conn_handle, self->handle, _read_cb, &read_info));
-        int error_code;
-        xTaskNotifyWait(0, 0, (uint32_t *)&error_code, 200);
-        CHECK_BLE_ERROR(error_code);
-        return read_info.len;
+        return bleio_gattc_read(conn_handle, self->handle, buf, len);
     } else {
         len = MIN(self->current_value_len, len);
         memcpy(buf, self->current_value, len);
@@ -164,30 +167,16 @@ size_t common_hal_bleio_characteristic_get_max_length(bleio_characteristic_obj_t
     return self->max_length;
 }
 
-static int _write_cb(uint16_t conn_handle,
-    const struct ble_gatt_error *error,
-    struct ble_gatt_attr *attr,
-    void *arg) {
-    TaskHandle_t task = (TaskHandle_t)arg;
-    xTaskNotify(task, error->status, eSetValueWithOverwrite);
-
-    return 0;
-}
-
 void common_hal_bleio_characteristic_set_value(bleio_characteristic_obj_t *self, mp_buffer_info_t *bufinfo) {
     if (common_hal_bleio_service_get_is_remote(self->service)) {
         uint16_t conn_handle = bleio_connection_get_conn_handle(self->service->connection);
         if ((self->props & CHAR_PROP_WRITE_NO_RESPONSE) != 0) {
             CHECK_NIMBLE_ERROR(ble_gattc_write_no_rsp_flat(conn_handle, self->handle, bufinfo->buf, bufinfo->len));
         } else {
-            CHECK_NIMBLE_ERROR(ble_gattc_write_flat(conn_handle, self->handle, bufinfo->buf, bufinfo->len, _write_cb, xTaskGetCurrentTaskHandle()));
-            int error_code;
-            xTaskNotifyWait(0, 0, (uint32_t *)&error_code, 200);
-            CHECK_BLE_ERROR(error_code);
+            bleio_gattc_write(conn_handle, self->handle, bufinfo->buf, bufinfo->len);
         }
     } else {
         // Validate data length for local characteristics only.
-        // TODO: Test this once we can get servers going.
         if (self->fixed_length && bufinfo->len != self->max_length) {
             mp_raise_ValueError(MP_ERROR_TEXT("Value length != required fixed length"));
         }
@@ -202,21 +191,7 @@ void common_hal_bleio_characteristic_set_value(bleio_characteristic_obj_t *self,
         }
 
         self->current_value_len = bufinfo->len;
-        // If we've already allocated an internal buffer or the provided buffer
-        // is on the heap, then copy into the internal buffer.
-        if (self->current_value_alloc > 0 || gc_nbytes(bufinfo->buf) > 0) {
-            if (self->current_value_alloc < bufinfo->len) {
-                self->current_value = m_realloc(self->current_value, bufinfo->len);
-                // Get the number of bytes from the heap because it may be more
-                // than the len due to gc block size.
-                self->current_value_alloc = gc_nbytes(self->current_value);
-            }
-            memcpy(self->current_value, bufinfo->buf, bufinfo->len);
-        } else {
-            // Otherwise, use the provided buffer to delay any heap allocation.
-            self->current_value = bufinfo->buf;
-            self->current_value_alloc = 0;
-        }
+        memcpy(self->current_value, bufinfo->buf, self->current_value_len);
 
         ble_gatts_chr_updated(self->handle);
     }
@@ -294,6 +269,7 @@ int bleio_characteristic_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                         bleio_packet_buffer_extend(MP_OBJ_FROM_PTR(self->observer), conn_handle, self->current_value, self->current_value_len);
                     }
                 }
+                background_callback_add_core(&bleio_background_callback);
                 return rc;
             }
             return BLE_ATT_ERR_UNLIKELY;
@@ -316,6 +292,10 @@ bleio_characteristic_properties_t common_hal_bleio_characteristic_get_properties
 void common_hal_bleio_characteristic_add_descriptor(bleio_characteristic_obj_t *self,
     bleio_descriptor_obj_t *descriptor) {
     size_t i = self->descriptor_list->len;
+    if (i >= MAX_DESCRIPTORS) {
+        mp_raise_bleio_BluetoothError(MP_ERROR_TEXT("Too many descriptors"));
+    }
+
     mp_obj_list_append(MP_OBJ_FROM_PTR(self->descriptor_list),
         MP_OBJ_FROM_PTR(descriptor));
 
@@ -346,10 +326,7 @@ void common_hal_bleio_characteristic_set_cccd(bleio_characteristic_obj_t *self, 
         (notify ? 1 << 0 : 0) |
         (indicate ? 1 << 1: 0);
 
-    CHECK_NIMBLE_ERROR(ble_gattc_write_flat(conn_handle, self->cccd_handle, &cccd_value, 2, _write_cb, xTaskGetCurrentTaskHandle()));
-    int error_code;
-    xTaskNotifyWait(0, 0, (uint32_t *)&error_code, 200);
-    CHECK_BLE_ERROR(error_code);
+    bleio_gattc_write(conn_handle, self->cccd_handle, (uint8_t *)&cccd_value, 2);
 }
 
 void bleio_characteristic_set_observer(bleio_characteristic_obj_t *self, mp_obj_t observer) {
